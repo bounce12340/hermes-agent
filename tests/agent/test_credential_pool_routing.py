@@ -6,6 +6,7 @@ Covers:
 3. Eager fallback deferred when credential pool has credentials
 4. Eager fallback fires when no credential pool exists
 5. Full 429 rotation cycle: retry-same → rotate → exhaust → fallback
+6. Session usage limits rotate immediately with a shorter cooldown
 """
 
 from types import SimpleNamespace
@@ -186,6 +187,44 @@ class TestPoolRotationCycle:
         assert has_retried is True
         pool.mark_exhausted_and_rotate.assert_not_called()
 
+    def test_ollama_session_usage_limit_rotates_on_first_429(self):
+        """Ollama Cloud session exhaustion should immediately use the next key."""
+        agent, pool, entries = self._make_agent_with_pool(3)
+        error_context = {
+            "message": (
+                "you (user) have reached your session usage limit, upgrade for "
+                "higher limits: https://ollama.com/upgrade"
+            )
+        }
+
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            error_context=error_context,
+        )
+
+        assert recovered is True
+        assert has_retried is False
+        pool.mark_exhausted_and_rotate.assert_called_once_with(
+            status_code=429,
+            error_context=error_context,
+        )
+        agent._swap_credential.assert_called_once_with(entries[1])
+
+    def test_general_429_message_still_retries_before_rotation(self):
+        """A generic rate limit must retain the existing retry-first behavior."""
+        agent, pool, _ = self._make_agent_with_pool(3)
+
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            error_context={"message": "rate limit exceeded"},
+        )
+
+        assert recovered is False
+        assert has_retried is True
+        pool.mark_exhausted_and_rotate.assert_not_called()
+
     def test_second_429_rotates_to_next(self):
         """Second consecutive 429 should rotate to next credential."""
         agent, pool, entries = self._make_agent_with_pool(3)
@@ -239,3 +278,51 @@ class TestPoolRotationCycle:
         )
         assert recovered is False
         assert has_retried is False
+
+
+# ---------------------------------------------------------------------------
+# 6. Session usage limit cooldown
+# ---------------------------------------------------------------------------
+
+class TestSessionUsageLimitCooldown:
+    @staticmethod
+    def _mark_exhausted(message):
+        from agent.credential_pool import CredentialPool, PooledCredential
+
+        entry = PooledCredential(
+            provider="ollama",
+            id="cred-0",
+            label="primary",
+            auth_type="api_key",
+            priority=0,
+            source="manual",
+            access_token="key-0",
+        )
+        pool = CredentialPool("ollama", [entry])
+        with patch.object(pool, "_persist"), patch(
+            "agent.credential_pool.time.time", return_value=10_000.0
+        ):
+            return pool._mark_exhausted(
+                entry,
+                status_code=429,
+                error_context={"message": message},
+            )
+
+    def test_session_usage_limit_uses_30_minute_cooldown(self):
+        from agent.credential_pool import _exhausted_until
+
+        exhausted = self._mark_exhausted(
+            "you (user) have reached your session usage limit, upgrade for "
+            "higher limits: https://ollama.com/upgrade"
+        )
+
+        assert _exhausted_until(exhausted) == 10_000.0 + 30 * 60
+
+    def test_explicit_retry_delay_still_takes_precedence(self):
+        from agent.credential_pool import _exhausted_until
+
+        exhausted = self._mark_exhausted(
+            "session usage limit; retry after 5 seconds"
+        )
+
+        assert _exhausted_until(exhausted) == 10_000.0 + 5

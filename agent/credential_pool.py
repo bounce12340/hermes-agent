@@ -120,6 +120,7 @@ SUPPORTED_POOL_STRATEGIES = {
 # Provider-supplied reset_at timestamps override these defaults.
 EXHAUSTED_TTL_401_SECONDS = 5 * 60           # 5 minutes
 EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
+EXHAUSTED_TTL_SESSION_USAGE_LIMIT_SECONDS = 30 * 60  # 30 minutes
 EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60      # 1 hour
 
 # Throttle window for the "no available entries" INFO line. Credential
@@ -348,7 +349,10 @@ def _extract_retry_delay_seconds(message: str) -> Optional[float]:
     return None
 
 
-def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _normalize_error_context(
+    error_context: Optional[Dict[str, Any]],
+    status_code: Optional[int] = None,
+) -> Dict[str, Any]:
     if not isinstance(error_context, dict):
         return {}
     normalized: Dict[str, Any] = {}
@@ -368,6 +372,11 @@ def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[st
         retry_delay_seconds = _extract_retry_delay_seconds(message)
         if retry_delay_seconds is not None:
             parsed_reset_at = time.time() + retry_delay_seconds
+        elif status_code == 429 and "session usage limit" in message.lower():
+            # The 429 body carries no reset time and the rolling-window
+            # remainder is unknown, so re-probe after an intentional
+            # 30-minute cooldown instead of the default 1-hour 429 TTL.
+            parsed_reset_at = time.time() + EXHAUSTED_TTL_SESSION_USAGE_LIMIT_SECONDS
     if parsed_reset_at is not None:
         normalized["reset_at"] = parsed_reset_at
     return normalized
@@ -653,7 +662,7 @@ class CredentialPool:
         status_code: Optional[int],
         error_context: Optional[Dict[str, Any]] = None,
     ) -> PooledCredential:
-        normalized_error = _normalize_error_context(error_context)
+        normalized_error = _normalize_error_context(error_context, status_code)
         # Permanent OAuth failures (token_invalidated, token_revoked, etc.)
         # transition to STATUS_DEAD instead of STATUS_EXHAUSTED.  Without this,
         # a revoked credential gets a 1-hour TTL cooldown and then re-enters
