@@ -58,3 +58,25 @@ def test_delegated_child_kanban_cli_refusal_returns_nonzero_exit_status(tmp_path
 
     assert refused.returncode == 1
     assert "delegate_task child contexts cannot mutate Kanban tasks via the CLI" in refused.stderr
+
+
+def test_kanban_exit_code_requeues_quota_failures_and_rejects_incomplete_success():
+    """Quota failures use the neutral sentinel; incomplete workers never use rc=0."""
+    from cli import _resolve_kanban_exit_code
+
+    assert _resolve_kanban_exit_code(
+        {"failed": True, "failure_reason": "rate_limit"},
+        is_kanban_task=True,
+    ) == 75
+    assert _resolve_kanban_exit_code(
+        {"failed": True, "failure_reason": "billing"},
+        is_kanban_task=True,
+    ) == 75
+    assert _resolve_kanban_exit_code(
+        {"completed": False},
+        is_kanban_task=True,
+    ) == 1
+    assert _resolve_kanban_exit_code(
+        {"failed": True},
+        is_kanban_task=False,
+    ) == 1

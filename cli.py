@@ -938,6 +938,56 @@ def _sync_process_session_id(session_id: str) -> None:
 
     set_current_session_id(session_id)
 
+
+def _classify_failure_metadata(agent: Any, error: BaseException) -> Dict[str, Any]:
+    """Return classifier fields for an exception that escaped a turn.
+
+    The normal conversation loop annotates returned failures. This defensive
+    CLI path must preserve the same signal so provider quota errors cannot
+    look like a clean Kanban worker exit.
+    """
+    try:
+        from agent.error_classifier import classify_api_error
+
+        classified = classify_api_error(
+            error,
+            provider=str(getattr(agent, "provider", None) or ""),
+            model=str(getattr(agent, "model", None) or ""),
+        )
+        return {
+            "failure_reason": classified.reason.value,
+            "failure_retryable": bool(classified.retryable),
+        }
+    except Exception:
+        # Failure reporting must never replace the original exception result.
+        logger.debug("Could not classify escaped conversation error", exc_info=True)
+        return {}
+
+
+def _resolve_kanban_exit_code(result: Any, *, is_kanban_task: bool) -> int:
+    """Map a one-shot result to the worker exit status.
+
+    Kanban workers must not report success for an incomplete turn, even when a
+    legacy or defensive path omitted ``failed``. Provider quota failures keep
+    the dedicated temp-fail sentinel so the dispatcher requeues neutrally.
+    """
+    if not isinstance(result, dict):
+        return 0
+    if not result.get("failed") and not (
+        is_kanban_task and result.get("completed") is False
+    ):
+        return 0
+    if is_kanban_task and result.get("failure_reason") in ("rate_limit", "billing"):
+        try:
+            from hermes_cli.kanban_db import (
+                KANBAN_RATE_LIMIT_EXIT_CODE as _rl_code,
+            )
+            return _rl_code
+        except Exception:
+            pass
+    return 1
+
+
 # Cron job system for scheduled tasks (execution is handled by the gateway)
 def get_job(*args, **kwargs):
     from cron import get_job as _get_job
@@ -17324,6 +17374,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                         "failed": True,
                         "error": _summary,
                     }
+                    result.update(_classify_failure_metadata(self.agent, exc))
                 finally:
                     if _one_turn_model_restore:
                         self._restore_model_runtime_snapshot(_one_turn_model_restore)
@@ -22364,19 +22415,12 @@ def main(
                         # 5-hour quota window can't trip the circuit breaker and
                         # permanently block the card. Non-kanban runs keep the
                         # plain 0/1 contract automation wrappers expect.
-                        _exit_code = 0
-                        if isinstance(result, dict) and result.get("failed"):
-                            _exit_code = 1
-                            if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                                "failure_reason"
-                            ) in ("rate_limit", "billing"):
-                                try:
-                                    from hermes_cli.kanban_db import (
-                                        KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
-                                    )
-                                    _exit_code = _RL_CODE
-                                except Exception:
-                                    _exit_code = 1
+                        _exit_code = _resolve_kanban_exit_code(
+                            result,
+                            is_kanban_task=bool(
+                                os.environ.get("HERMES_KANBAN_TASK")
+                            ),
+                        )
                         sys.exit(_exit_code)
 
                 # Exit with error code if credentials or agent init fails

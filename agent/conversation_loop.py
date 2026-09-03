@@ -3381,6 +3381,8 @@ def run_conversation(
                             "completed": False,
                             "failed": True,
                             "error": _nous_msg,
+                            "failure_reason": "rate_limit",
+                            "failure_retryable": True,
                         }
                 except ImportError:
                     pass
@@ -3936,7 +3938,7 @@ def run_conversation(
                         logger.error("%sInvalid API response after %d retries.", agent.log_prefix, max_retries)
                         agent._persist_session(messages, conversation_history)
                         _final_response = f"Invalid API response after {max_retries} retries: {_failure_hint}"
-                        return {
+                        _invalid_response_result = {
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
@@ -3944,6 +3946,12 @@ def run_conversation(
                             "error": _final_response,
                             "failed": True  # Mark as failure for filtering
                         }
+                        if _resp_error_code == 429:
+                            _invalid_response_result.update(
+                                failure_reason="rate_limit",
+                                failure_retryable=True,
+                            )
+                        return _invalid_response_result
                     
                     # Backoff before retry — jittered exponential: 5s base, 120s cap
                     wait_time = jittered_backoff(retry_count, base_delay=5.0, max_delay=120.0)
@@ -6968,6 +6976,8 @@ def run_conversation(
                         "completed": False,
                         "failed": True,
                         "error": _nonretryable_summary,
+                        "failure_reason": classified.reason.value,
+                        "failure_retryable": bool(classified.retryable),
                     }
 
                 if retry_count >= max_retries:
