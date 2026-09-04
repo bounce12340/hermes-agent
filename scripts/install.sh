@@ -2499,11 +2499,14 @@ run_npm_install_with_retries() {
     local log_file="$1"
     shift
 
+    : >"$log_file"
     local attempt=1
     local max_attempts=3
     while [ "$attempt" -le "$max_attempts" ]; do
-        : >"$log_file"
-        if run_with_timeout "$NODE_DEPS_TIMEOUT" "$@" >"$log_file" 2>&1; then
+        if [ "$attempt" -gt 1 ]; then
+            printf '\n---- npm install retry %s/%s ----\n' "$attempt" "$max_attempts" >>"$log_file"
+        fi
+        if run_with_timeout "$NODE_DEPS_TIMEOUT" "$@" >>"$log_file" 2>&1; then
             return 0
         fi
         if [ "$attempt" -lt "$max_attempts" ]; then
