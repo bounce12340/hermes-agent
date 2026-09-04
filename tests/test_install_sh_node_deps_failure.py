@@ -21,6 +21,7 @@ def _run_node_deps_stage(
     tmp_path: Path,
     *,
     fail_directory: str | None,
+    fail_attempts: int = 0,
 ) -> tuple[subprocess.CompletedProcess[str], Path, list[str]]:
     install_dir = tmp_path / "install"
     tui_dir = install_dir / "ui-tui"
@@ -49,7 +50,14 @@ if [ "${1:-}" = "--version" ]; then
     exit 0
 fi
 printf '%s\\n' "$PWD" >> "$NPM_CALLS"
-if [ -n "${NPM_FAIL_DIRECTORY:-}" ] && [ "$PWD" = "$NPM_FAIL_DIRECTORY" ]; then
+count_file="${NPM_ATTEMPT_DIR}/$(printf '%s' "$PWD" | tr '/' '_').count"
+count=0
+if [ -f "$count_file" ]; then
+    count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+if [ -n "${NPM_FAIL_DIRECTORY:-}" ] && [ "$PWD" = "$NPM_FAIL_DIRECTORY" ] && [ "$count" -le "${NPM_FAIL_ATTEMPTS:-0}" ]; then
     echo "simulated npm lifecycle failure" >&2
     exit 37
 fi
@@ -64,10 +72,13 @@ exit 0
             "HERMES_HOME": str(hermes_home),
             "HERMES_INSTALL_DIR": str(install_dir),
             "NPM_CALLS": str(npm_calls),
+            "NPM_ATTEMPT_DIR": str(tmp_path / "npm-attempts"),
             "NPM_FAIL_DIRECTORY": fail_directory or "",
+            "NPM_FAIL_ATTEMPTS": str(fail_attempts),
             "PATH": f"{bin_dir}:{env['PATH']}",
         }
     )
+    Path(env["NPM_ATTEMPT_DIR"]).mkdir()
     proc = subprocess.run(
         [
             "bash",
@@ -97,6 +108,7 @@ def test_root_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
     proc, actual_install_dir, calls = _run_node_deps_stage(
         tmp_path,
         fail_directory=str(install_dir),
+        fail_attempts=3,
     )
 
     assert actual_install_dir == install_dir
@@ -107,7 +119,7 @@ def test_root_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
         "skipped": False,
         "reason": "exit code 1",
     }
-    assert calls == [str(install_dir)]
+    assert calls == [str(install_dir)] * 3
     assert "Node.js dependencies installed" not in proc.stdout
     assert "TUI dependencies installed" not in proc.stdout
     assert not (install_dir / "node_modules").exists()
@@ -119,13 +131,34 @@ def test_tui_node_dependency_failure_is_fatal(tmp_path: Path) -> None:
     proc, _, calls = _run_node_deps_stage(
         tmp_path,
         fail_directory=str(tui_dir),
+        fail_attempts=3,
     )
 
     assert proc.returncode != 0
     assert _stage_result(proc)["ok"] is False
-    assert calls == [str(install_dir), str(tui_dir)]
+    assert calls == [str(install_dir), str(tui_dir), str(tui_dir), str(tui_dir)]
     assert "Node.js dependencies installed" in proc.stdout
     assert "TUI dependencies installed" not in proc.stdout
+
+
+def test_root_node_dependency_transient_failure_retries_then_succeeds(tmp_path: Path) -> None:
+    install_dir = tmp_path / "install"
+    proc, _, calls = _run_node_deps_stage(
+        tmp_path,
+        fail_directory=str(install_dir),
+        fail_attempts=1,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _stage_result(proc) == {
+        "ok": True,
+        "stage": "node-deps",
+        "skipped": False,
+    }
+    assert calls == [str(install_dir), str(install_dir), str(install_dir / "ui-tui")]
+    assert "retrying (1/3)" in proc.stdout
+    assert "Node.js dependencies installed" in proc.stdout
+    assert "TUI dependencies installed" in proc.stdout
 
 
 def test_node_dependency_success_remains_successful(tmp_path: Path) -> None:
