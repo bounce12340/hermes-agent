@@ -2495,6 +2495,27 @@ run_with_timeout() {
     return 124
 }
 
+run_npm_install_with_retries() {
+    local log_file="$1"
+    shift
+
+    local attempt=1
+    local max_attempts=3
+    while [ "$attempt" -le "$max_attempts" ]; do
+        : >"$log_file"
+        if run_with_timeout "$NODE_DEPS_TIMEOUT" "$@" >"$log_file" 2>&1; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            log_warn "npm install failed or timed out; retrying ($attempt/$max_attempts)..."
+            sleep "$attempt"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
 # Return success only when the host is an apt release NEWER than the newest one
 # Playwright's platform resolver recognizes — the exact condition that makes
 # `playwright install` hang uninterruptibly (#35166). We scope the override
@@ -2676,8 +2697,8 @@ install_node_deps() {
         node_deps_workspace_args "$INSTALL_DIR"
         local npm_log
         npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install "${NODE_DEPS_WORKSPACE_ARGS[@]}" --silent \
-                >"$npm_log" 2>&1; then
+        if ! run_npm_install_with_retries "$npm_log" \
+                npm install "${NODE_DEPS_WORKSPACE_ARGS[@]}" --silent; then
             log_error "npm install failed or timed out; Node.js dependencies were not installed"
             if [ -s "$npm_log" ]; then
                 log_error "npm output:"
@@ -2792,8 +2813,7 @@ install_node_deps() {
         # Capture npm output so failures are diagnosable (#87340).
         local tui_npm_log
         tui_npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
-                >"$tui_npm_log" 2>&1; then
+        if ! run_npm_install_with_retries "$tui_npm_log" npm install --silent; then
             log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
             if [ -s "$tui_npm_log" ]; then
                 log_error "npm output:"
