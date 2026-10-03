@@ -539,8 +539,16 @@ def _make_hermes_provider_class() -> Optional[type]:
             Servers that advertise a real RFC 7591 endpoint — even one hosted at
             ``origin/register`` — pass through untouched.
             """
-            import httpx  # local import: httpx is an MCP SDK dependency
             from urllib.parse import urljoin
+
+            # The SDK's httpx flavour, not Hermes' — mcp 2.0 builds its
+            # registration Request with httpx2, so an ``httpx.Request``
+            # isinstance check would never match and the guard would be dead.
+            # See tools.mcp_tool.sdk_httpx.
+            from tools.mcp_tool import sdk_httpx
+            httpx = sdk_httpx()
+            if httpx is None:  # pragma: no cover — SDK import would have failed
+                return
 
             if not isinstance(outgoing, httpx.Request):
                 return
@@ -617,8 +625,15 @@ def _make_hermes_provider_class() -> Optional[type]:
                 outgoing = await inner.__anext__()
                 while True:
                     # Refuse the SDK's fabricated DCR request (ASM without a
-                    # registration_endpoint) before it hits the network.
-                    await self._maybe_reject_fabricated_registration(outgoing)
+                    # registration_endpoint) before it hits the network.  Close
+                    # the inner flow before raising: it holds context.lock, and
+                    # leaving it suspended would block this server's next auth
+                    # flow until the generator happens to be garbage-collected.
+                    try:
+                        await self._maybe_reject_fabricated_registration(outgoing)
+                    except OAuthRegistrationError:
+                        await inner.aclose()
+                        raise
                     # The SDK holds context.lock for its entire generator,
                     # including while HTTPX waits on the actual MCP request.
                     # Release it only for that request.  OAuth discovery,

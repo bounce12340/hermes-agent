@@ -336,7 +336,8 @@ async def test_fabricated_dcr_registration_rejected_before_network(tmp_path, mon
     registration_endpoint -> fabricated registration POST) through the
     generator manually, exactly like the other tests in this file.
     """
-    import httpx
+    from tools.mcp_tool import sdk_httpx
+    httpx = sdk_httpx()
     from mcp.client.auth import OAuthRegistrationError
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyUrl
@@ -428,6 +429,9 @@ async def test_fabricated_dcr_registration_rejected_before_network(tmp_path, mon
     assert "https://example.com/register" in text
     assert "config.yaml" in text
     assert "hermes mcp login srv" in text
+    # The rejected flow must not leave the SDK's context.lock held, or the
+    # next auth flow for this server would block until GC finalizes it.
+    assert provider.context.lock.value == 1
     await flow.aclose()
 
 
@@ -441,7 +445,8 @@ async def test_advertised_registration_endpoint_passes_through(tmp_path, monkeyp
     fabricated URL **and** no advertised registration_endpoint) must let
     such servers through; otherwise every legitimate DCR flow breaks.
     """
-    import httpx
+    from tools.mcp_tool import sdk_httpx
+    httpx = sdk_httpx()
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyUrl
 
@@ -533,7 +538,8 @@ async def test_guard_ignores_non_fabricated_post_paths(tmp_path, monkeypatch):
     registration_endpoint. A server-side registration at ``/foo/register``
     or any other path passes through untouched.
     """
-    import httpx
+    from tools.mcp_tool import sdk_httpx
+    httpx = sdk_httpx()
     from mcp.shared.auth import OAuthClientMetadata
     from pydantic import AnyUrl
 
