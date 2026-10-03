@@ -136,6 +136,29 @@ def _headers_dict(msg: dict) -> dict[str, str]:
     }
 
 
+_REPLY_PARENT_HEADERS = ["From", "Subject", "Message-ID", "References", "In-Reply-To"]
+
+
+def _set_reply_threading_headers(message, parent_headers: dict[str, str]) -> None:
+    """Set In-Reply-To/References per RFC 5322 §3.6.4.
+
+    References must carry the parent's whole chain, not just the parent's id:
+    Gmail threads on threadId, but Apple Mail, Thunderbird and Outlook thread
+    on References, so a one-hop chain splits the conversation there.
+    """
+    parent_id = parent_headers.get("message-id", "").strip()
+    if not parent_id:
+        return
+    # Folded headers arrive with CRLF + whitespace; collapse to single spaces.
+    chain = " ".join(parent_headers.get("references", "").split())
+    if not chain:
+        in_reply_to = parent_headers.get("in-reply-to", "").split()
+        if len(in_reply_to) == 1:
+            chain = in_reply_to[0]
+    message["In-Reply-To"] = parent_id
+    message["References"] = f"{chain} {parent_id}".strip()
+
+
 def _extract_message_body(msg: dict) -> str:
     body = ""
     payload = msg.get("payload", {})
@@ -366,7 +389,7 @@ def gmail_reply(args):
                 "userId": "me",
                 "id": args.message_id,
                 "format": "metadata",
-                "metadataHeaders": ["From", "Subject", "Message-ID"],
+                "metadataHeaders": _REPLY_PARENT_HEADERS,
             },
         )
         headers = _headers_dict(original)
@@ -380,9 +403,7 @@ def gmail_reply(args):
         message["Subject"] = subject
         if args.from_header:
             message["From"] = args.from_header
-        if headers.get("message-id"):
-            message["In-Reply-To"] = headers["message-id"]
-            message["References"] = headers["message-id"]
+        _set_reply_threading_headers(message, headers)
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         result = _run_gws(
@@ -396,7 +417,7 @@ def gmail_reply(args):
     service = build_service("gmail", "v1")
     original = service.users().messages().get(
         userId="me", id=args.message_id, format="metadata",
-        metadataHeaders=["From", "Subject", "Message-ID"],
+        metadataHeaders=_REPLY_PARENT_HEADERS,
     ).execute()
     headers = _headers_dict(original)
 
@@ -409,9 +430,7 @@ def gmail_reply(args):
     message["Subject"] = subject
     if args.from_header:
         message["From"] = args.from_header
-    if headers.get("message-id"):
-        message["In-Reply-To"] = headers["message-id"]
-        message["References"] = headers["message-id"]
+    _set_reply_threading_headers(message, headers)
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     body = {"raw": raw, "threadId": original["threadId"]}
